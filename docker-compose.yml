@@ -1,18 +1,7 @@
 services:
 
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.3.2
-    hostname: zookeeper
-    container_name: zookeeper
-    ports:
-      - "2181:2181"
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_SERVER_ID: 1
-      ZOOKEEPER_SERVERS: zookeeper:2888:3888
-
   kafka:
-    image: confluentinc/cp-kafka:7.3.2
+    image: apache/kafka:4.3.0
     restart: on-failure
     hostname: kafka
     container_name: kafka
@@ -21,48 +10,80 @@ services:
       - "19092:19092"
       - "9999:9999"
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-
-      KAFKA_LISTENERS: INTERNAL://0.0.0.0:19092,EXTERNAL://0.0.0.0:9092
+      # ===== KRaft =====
+      KAFKA_NODE_ID: 1 # аналог KAFKA_BROKER_ID
+      KAFKA_PROCESS_ROLES: broker,controller # один процесс выполняет обе роли
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093 # controller quorum вместо ZooKeeper
+      # ===== Listeners =====
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:19092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
-
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # ===== Single Node =====
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
 
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false" # чтобы не создавать случайные топики
+
       KAFKA_JMX_PORT: 9999
       KAFKA_JMX_HOSTNAME: ${DOCKER_HOST_IP:-127.0.0.1}
 
-      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
-      KAFKA_AUTHORIZER_CLASS_NAME: kafka.security.authorizer.AclAuthorizer
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
       KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
-    depends_on:
-      - zookeeper
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh",
+          "--bootstrap-server",
+          "localhost:19092"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   init-kafka:
-    image: confluentinc/cp-kafka:7.3.2
-    restart: no
+    image: apache/kafka:4.3.0
+    restart: "no"
     depends_on:
-      - kafka
-    entrypoint: [ "/bin/sh", "-c" ]
-    command: |
-      "
-      echo 'Waiting for Kafka...'
-      until kafka-topics --bootstrap-server kafka:19092 --list; do
-        sleep 5
-      done
+      kafka:
+        condition: service_healthy
+    command: >
+      sh -c '
 
-      echo 'Creating kafka topics'
-      kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic stock.events --replication-factor 1 --partitions 1
-      kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic basket.events --replication-factor 1 --partitions 1
-      kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic order.events --replication-factor 1 --partitions 1
+      echo "Creating kafka topics"
 
-      echo 'Successfully created the following topics:'
-      kafka-topics --bootstrap-server kafka:19092 --list
-      "
+      /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server kafka:19092 \
+        --create \
+        --if-not-exists \
+        --topic stock.events \
+        --partitions 1 \
+        --replication-factor 1
+
+      /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server kafka:19092 \
+        --create \
+        --if-not-exists \
+        --topic basket.events \
+        --partitions 1 \
+        --replication-factor 1
+
+      /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server kafka:19092 \
+        --create \
+        --if-not-exists \
+        --topic order.events \
+        --partitions 1 \
+        --replication-factor 1
+
+      /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server kafka:19092 \
+        --list
+      '
 
   debezium:
     image: debezium/connect:2.7.3.Final
@@ -81,6 +102,17 @@ services:
       - ./connectors:/kafka/connectors
     depends_on:
       - kafka
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "http://localhost:8083/connectors"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   connect-init:
     image: curlimages/curl:8.5.0
@@ -98,7 +130,8 @@ services:
     volumes:
       - ./connectors/outbox-connector.json:/data/outbox-connector.json:ro
     depends_on:
-      - debezium
+      debezium:
+        condition: service_healthy
 
   kowl:
     image: quay.io/cloudhut/kowl:v1.4.0

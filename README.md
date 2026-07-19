@@ -19,7 +19,7 @@ docker compose up -d
 
 Cоздать выборочно (удалите лишнее):
 ```
-docker compose up -d  kafka init-kafka kowl debezuim connect-init backoffice
+docker compose up -d  kafka init-kafka kowl debezium connect-init backoffice
 ```
 
 Остановить и полностью удалить контейнеры:
