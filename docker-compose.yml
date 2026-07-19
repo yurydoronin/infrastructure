@@ -1,0 +1,105 @@
+services:
+
+  kafka:
+    image: apache/kafka:latest
+    restart: on-failure
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+      - "9999:9999"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:19092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: ${DOCKER_HOST_IP:-127.0.0.1}
+
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+      KAFKA_AUTHORIZER_CLASS_NAME: kafka.security.authorizer.AclAuthorizer
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
+
+  init-kafka:
+    image: confluentinc/cp-kafka:7.3.2
+    restart: no
+    depends_on:
+      - kafka
+    entrypoint: [ "/bin/sh", "-c" ]
+    command: |
+      "
+      echo 'Waiting for Kafka...'
+      until kafka-topics --bootstrap-server kafka:19092 --list; do
+        sleep 5
+      done
+
+      echo 'Creating kafka topics'
+      kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic stock.events --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic basket.events --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:19092 --create --if-not-exists --topic order.events --replication-factor 1 --partitions 1
+
+      echo 'Successfully created the following topics:'
+      kafka-topics --bootstrap-server kafka:19092 --list
+      "
+
+  debezium:
+    image: debezium/connect:2.7.3.Final
+    restart: on-failure
+    container_name: debezium
+    ports:
+      - "8085:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:19092
+      GROUP_ID: "debezium"
+      CONFIG_STORAGE_TOPIC: "connect-configs"
+      OFFSET_STORAGE_TOPIC: "connect-offsets"
+      STATUS_STORAGE_TOPIC: "connect-status"
+      CONNECTORS_DIR: /kafka/connectors
+    volumes:
+      - ./connectors:/kafka/connectors
+    depends_on:
+      - kafka
+
+  connect-init:
+    image: curlimages/curl:8.5.0
+    restart: no
+    entrypoint: >
+      /bin/sh -c '
+        until curl -sS -f http://debezium:8083/connectors; do
+          echo "Waiting for Kafka Connect to be ready..."
+          sleep 5
+        done
+        echo "Kafka Connect is ready!"
+        curl -X POST -H "Content-Type: application/json" --data @/data/outbox-connector.json http://debezium:8083/connectors/
+        echo "Debezium connector registered!"
+      '
+    volumes:
+      - ./connectors/outbox-connector.json:/data/outbox-connector.json:ro
+    depends_on:
+      - debezium
+
+  kowl:
+    image: quay.io/cloudhut/kowl:v1.4.0
+    restart: on-failure
+    volumes:
+      - ./kowl_config:/etc/kowl:Z
+    ports:
+      - "8087:8080"
+    entrypoint: ./kowl --config.filepath=/etc/kowl/config.yaml
+    depends_on:
+      - init-kafka
+
+  backoffice:
+    image: registry.gitlab.com/microarch-ru/ddd-in-practice/front-end/backoffice:latest
+    restart: on-failure
+    ports:
+      - "8086:8080"
