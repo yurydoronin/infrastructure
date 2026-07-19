@@ -5,7 +5,7 @@
 **Delivery**
 находятся [в репозитории Кирилла Ветчинкина](https://gitlab.com/microarch-ru/ddd-in-practice/infrastructure)
 
-- Kafka
+- Kafka 4.0
 - [Kowl](http://localhost:8087)
 - Debezium
 - [Backoffice](http://localhost:8086)
